@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import filedialog
+from tkinter import filedialog, messagebox
 import subprocess
 
 def convert_ex4_to_mq4():
@@ -12,13 +12,13 @@ def convert_ex4_to_mq4():
         return
 
     decompiler_path = 'path_to_decompiler/Ex4_to_Mq4_Decompiler.exe'
-    command = f'{decompiler_path} "{ex4_file_path}" "{mq4_output_path}"'
+    command = f'"{decompiler_path}" "{ex4_file_path}" "{mq4_output_path}"'
 
     try:
         subprocess.run(command, shell=True, check=True)
-        result_label.config(text=f"Successfully converted {ex4_file_path} to {mq4_output_path}", fg="green")
+        messagebox.showinfo("Success", f"Successfully converted {ex4_file_path} to {mq4_output_path}")
     except subprocess.CalledProcessError as e:
-        result_label.config(text=f"Error converting {ex4_file_path} to {mq4_output_path}: {e}", fg="red")
+        messagebox.showerror("Error", f"Error converting {ex4_file_path} to {mq4_output_path}: {e}")
 
 def create_gui():
     root = tk.Tk()
@@ -26,10 +26,6 @@ def create_gui():
 
     browse_button = tk.Button(root, text="Browse EX4 File", command=convert_ex4_to_mq4)
     browse_button.pack(pady=20)
-
-    global result_label
-    result_label = tk.Label(root, text="", fg="green")
-    result_label.pack()
 
     root.mainloop()
 
