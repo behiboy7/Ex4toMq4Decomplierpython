@@ -1,37 +1,187 @@
-import tkinter as tk
-from tkinter import filedialog
-import subprocess
+#!/usr/bin/env python
+# Mode: -*- python -*-
+#
+# Copyright (c) 2000-2002 by hartmut Goebel <h.goebel@crazy-compilers.com>
+#
+'''
+Usage: uncompyle2 [OPTIONS]... [ FILE | DIR]...
 
-def convert_ex4_to_mq4():
-    ex4_file_path = filedialog.askopenfilename(filetypes=[("EX4 Files", "*.ex4")])
-    if not ex4_file_path:
-        return
+Examples:
+  uncompyle2      foo.pyc bar.pyc       # decompile foo.pyc, bar.pyc to stdout
+  uncompyle2 -o . foo.pyc bar.pyc       # decompile to ./foo.pyc_dis and ./bar.pyc_dis
+  uncompyle2 -o /tmp /usr/lib/python1.5 # decompile whole library
 
-    mq4_output_path = filedialog.asksaveasfilename(defaultextension=".mq4", filetypes=[("MQ4 Files", "*.mq4")])
-    if not mq4_output_path:
-        return
+Options:
+  -o <path>     output decompiled files to this path:
+                if multiple input files are decompiled, the common prefix
+                is stripped from these names and the remainder appended to
+                <path>
+                  uncompyle -o /tmp bla/fasel.pyc bla/foo.pyc
+                    -> /tmp/fasel.pyc_dis, /tmp/foo.pyc_dis
+                  uncompyle -o /tmp bla/fasel.pyc bar/foo.pyc
+                    -> /tmp/bla/fasel.pyc_dis, /tmp/bar/foo.pyc_dis
+                  uncompyle -o /tmp /usr/lib/python1.5
+                    -> /tmp/smtplib.pyc_dis ... /tmp/lib-tk/FixTk.pyc_dis
+  -c <file>     attempts a disassembly after compiling <file>
+  -d            do not print timestamps
+  -p <integer>  use <integer> number of processes
+  -r            recurse directories looking for .pyc and .pyo files
+  --verify      compare generated source with input byte-code
+                (requires -o)
+  --help        show this message
 
-    decompiler_path = 'path_to_decompiler/Ex4_to_Mq4_Decompiler.exe'
-    command = f'{decompiler_path} "{ex4_file_path}" "{mq4_output_path}"'
+Debugging Options:
+  --showasm   -a  include byte-code                  (disables --verify)
+  --showast   -t  include AST (abstract syntax tree) (disables --verify)
+
+Extensions of generated files:
+  '.pyc_dis' '.pyo_dis'   successfully decompiled (and verified if --verify)
+    + '_unverified'       successfully decompile but --verify failed
+    + '_failed'           decompile failed (contact author for enhancement)
+'''
+
+Usage_short = \
+"uncompyle2 [--help] [--verify] [--showasm] [--showast] [-o <path>] FILE|DIR..."
+
+import sys, os, getopt
+import os.path
+from uncompyle2 import main, verify
+import time
+
+if sys.version[:3] != '2.7':
+    print >>sys.stderr, 'Error:  uncompyle2 requires Python 2.7.'
+    sys.exit(-1)
+    
+showasm = showast = do_verify = numproc = recurse_dirs = 0
+outfile = '-'
+out_base = None
+codes = []
+timestamp = True
+timestampfmt = "# %Y.%m.%d %H:%M:%S %Z"
+
+try:
+    opts, files = getopt.getopt(sys.argv[1:], 'hatdro:c:p:',
+                           ['help', 'verify', 'showast', 'showasm'])
+except getopt.GetoptError, e:
+    print >>sys.stderr, '%s: %s' % (os.path.basename(sys.argv[0]), e)
+    sys.exit(-1)    
+
+for opt, val in opts:
+    if opt in ('-h', '--help'):
+        print __doc__
+        sys.exit(0)
+    elif opt == '--verify':
+        do_verify = 1
+    elif opt in ('--showasm', '-a'):
+        showasm = 1
+        do_verify = 0
+    elif opt in ('--showast', '-t'):
+        showast = 1
+        do_verify = 0
+    elif opt == '-o':
+        outfile = val
+    elif opt == '-d':
+        timestamp = False
+    elif opt == '-c':
+        codes.append(val)
+    elif opt == '-p':
+        numproc = int(val)
+    elif opt == '-r':
+        recurse_dirs = 1
+    else:
+        print opt
+        print Usage_short
+        sys.exit(1)
+
+# expand directory if specified
+if recurse_dirs:
+    expanded_files = []
+    for f in files:
+        if os.path.isdir(f):
+            for root, _, dir_files in os.walk(f):
+                for df in dir_files:
+                    if df.endswith('.pyc') or df.endswith('.pyo'):
+                        expanded_files.append(os.path.join(root, df))
+    files = expanded_files
+
+# argl, commonprefix works on strings, not on path parts,
+# thus we must handle the case with files in 'some/classes'
+# and 'some/cmds'
+src_base = os.path.commonprefix(files)
+if src_base[-1:] != os.sep:
+    src_base = os.path.dirname(src_base)
+if src_base:
+    sb_len = len( os.path.join(src_base, '') )
+    files = map(lambda f: f[sb_len:], files)
+    del sb_len
+    
+if outfile == '-':
+    outfile = None # use stdout
+elif outfile and os.path.isdir(outfile):
+    out_base = outfile; outfile = None
+elif outfile and len(files) > 1:
+    out_base = outfile; outfile = None
+
+if timestamp:
+    print time.strftime(timestampfmt)
+if numproc <= 1:
+    try:
+        result = main(src_base, out_base, files, codes, outfile, showasm, showast, do_verify)
+        print '# decompiled %i files: %i okay, %i failed, %i verify failed' % result
+    except (KeyboardInterrupt):
+        pass
+    except verify.VerifyCmpError:
+        raise
+else:
+    from multiprocessing import Process, Queue
+    from Queue import Empty
+    fqueue = Queue(len(files)+numproc)
+    for f in files:
+        fqueue.put(f)
+    for i in range(numproc):
+        fqueue.put(None)
+        
+    rqueue = Queue(numproc)
+    
+    def process_func():
+        try:
+            (tot_files, okay_files, failed_files, verify_failed_files) = (0,0,0,0)
+            while 1:
+                f = fqueue.get()
+                if f == None:
+                    break
+                (t, o, f, v) = \
+                    main(src_base, out_base, [f], codes, outfile, showasm, showast, do_verify)
+                tot_files += t
+                okay_files += o
+                failed_files += f
+                verify_failed_files += v
+        except (Empty, KeyboardInterrupt):
+            pass
+        rqueue.put((tot_files, okay_files, failed_files, verify_failed_files))
+        rqueue.close()
 
     try:
-        subprocess.run(command, shell=True, check=True)
-        result_label.config(text=f"Successfully converted {ex4_file_path} to {mq4_output_path}", fg="green")
-    except subprocess.CalledProcessError as e:
-        result_label.config(text=f"Error converting {ex4_file_path} to {mq4_output_path}: {e}", fg="red")
+        procs = [Process(target=process_func) for i in range(numproc)]
+        for p in procs:
+            p.start()
+        for p in procs:
+            p.join()
+        try:
+            (tot_files, okay_files, failed_files, verify_failed_files) = (0,0,0,0)
+            while 1:
+                (t, o, f, v) = rqueue.get(False)
+                tot_files += t
+                okay_files += o
+                failed_files += f
+                verify_failed_files += v
+        except Empty:
+            pass
+        print '# decompiled %i files: %i okay, %i failed, %i verify failed' % \
+              (tot_files, okay_files, failed_files, verify_failed_files)
+    except (KeyboardInterrupt, OSError):
+        pass
+        
 
-def create_gui():
-    root = tk.Tk()
-    root.title("EX4 to MQ4 Converter")
-
-    browse_button = tk.Button(root, text="Browse EX4 File", command=convert_ex4_to_mq4)
-    browse_button.pack(pady=20)
-
-    global result_label
-    result_label = tk.Label(root, text="", fg="green")
-    result_label.pack()
-
-    root.mainloop()
-
-if __name__ == "__main__":
-    create_gui()
+if timestamp:
+    print time.strftime(timestampfmt)
