@@ -12,7 +12,7 @@ def convert_ex4_to_mq4():
         return
 
     decompiler_path = 'path_to_decompiler/Ex4_to_Mq4_Decompiler.exe'
-    command = f'{decompiler_path} "{ex4_file_path}" "{mq4_output_path}"'
+    command = f'"{decompiler_path}" "{ex4_file_path}" "{mq4_output_path}"'
 
     try:
         subprocess.run(command, shell=True, check=True)
